@@ -28,6 +28,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(DRIVER_SOURCES 
     dri_protector.c
     dri_callbacks.c
+    dri_notify.c
 )
 set(CMAKE_C_FLAGS_DEBUG "/Od /Zi")
 # 驱动生成
@@ -56,5 +57,5 @@ target_link_libraries(HideWindow PRIVATE user32 kernel32)
 
 # 可执行文件
 add_executable(ProtIt main.cpp)
-# 链接必要的 Windows 库 (ntdll 用于 NtQueryInformationProcess, user32/kernel32 用于其他 API)
-target_link_libraries(ProtIt PRIVATE ntdll user32 kernel32)
+# 链接必要的 Windows 库
+target_link_libraries(ProtIt PRIVATE ntdll user32 kernel32 Shlwapi)

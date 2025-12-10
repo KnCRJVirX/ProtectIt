@@ -8,6 +8,7 @@
 #include <ntifs.h>
 
 extern PDRIVER_OBJECT GlobalDriverObject;
-extern PVOID GlobalRegistrationHandle;
+
+VOID CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info);
 
 #endif // DRI_PROTECTOR_H

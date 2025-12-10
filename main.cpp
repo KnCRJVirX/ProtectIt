@@ -3,9 +3,14 @@
 
 #include <windows.h>
 #include <winioctl.h>
+#include <Shlwapi.h>
 #include "protectordef.h"
+#include "Injector.hpp"
+
+#define HIDE_WINDOW_MODULE_NAME L"HideWindow.dll"
 
 enum WorkMode {
+    HideWindow,
     Protect,
     Unprotect,
     AddWhite,
@@ -14,7 +19,7 @@ enum WorkMode {
 
 HANDLE hDriver = INVALID_HANDLE_VALUE;
 
-BOOL ProtectProcess(const char* processName) {
+BOOL IoCtlDriver(DWORD ioctlCode, const char* processName) {
     ProtectProcessInfo info = { 0 };
     strcpy(info.processName, processName);
     info.processName[sizeof(info.processName) - 1] = 0;
@@ -22,7 +27,7 @@ BOOL ProtectProcess(const char* processName) {
     DWORD bytes = 0;
     printf("Send IOCtl, Code: 0x%X, processname: %s\n", IOCTL_PROT_PROCESS, info.processName);
     BOOL ok = DeviceIoControl(hDriver,
-                              IOCTL_PROT_PROCESS,
+                              ioctlCode,
                               &info, sizeof(info),
                               NULL, 0,
                               &bytes,
@@ -35,74 +40,81 @@ BOOL ProtectProcess(const char* processName) {
 
     printf("OK!\n");
     return TRUE;
+}
+
+BOOL IoCtlDriverWithReturn(DWORD ioctlCode, PVOID buffer, DWORD bufferSize) {
+    DWORD bytes = 0;
+    BOOL ok = DeviceIoControl(hDriver,
+                              ioctlCode,
+                              NULL, 0,
+                              buffer, bufferSize,
+                              &bytes,
+                              NULL);
+
+    if (!ok) {
+        printf("DeviceIoControl 失败, GetLastError=%lu\n", GetLastError());
+        return FALSE;
+    }
+
+    printf("OK!\n");
+    return TRUE;
+}
+
+DWORD WaitForCreateProcess() {
+    DWORD processId = 0;
+    IoCtlDriverWithReturn(IOCTL_NOTIFY_CREATE_PS, &processId, sizeof(processId));
+    printf("Create Process pid: %d\n", processId);
+    return processId;
+}
+
+BOOL ProtectProcess(const char* processName) {
+    return IoCtlDriver(IOCTL_PROT_PROCESS, processName);
 }
 
 BOOL AddWhiteProcess(const char* processName) {
-    ProtectProcessInfo info = { 0 };
-    strcpy(info.processName, processName);
-    info.processName[sizeof(info.processName) - 1] = 0;
-
-    DWORD bytes = 0;
-    printf("Send IOCtl, Code: 0x%X, processname: %s\n", IOCTL_ADD_WHITE, info.processName);
-    BOOL ok = DeviceIoControl(hDriver,
-                              IOCTL_ADD_WHITE,
-                              &info, sizeof(info),
-                              NULL, 0,
-                              &bytes,
-                              NULL);
-
-    if (!ok) {
-        printf("DeviceIoControl 失败, GetLastError=%lu\n", GetLastError());
-        return FALSE;
-    }
-
-    printf("OK!\n");
-    return TRUE;
+    return IoCtlDriver(IOCTL_ADD_WHITE, processName);
 }
 
 BOOL UnprotectProcess(const char* processName) {
-    ProtectProcessInfo info = { 0 };
-    strcpy(info.processName, processName);
-    info.processName[sizeof(info.processName) - 1] = 0;
-
-    DWORD bytes = 0;
-    printf("Send IOCtl, Code: 0x%X, processname: %s\n", IOCTL_UNPROT_PROCESS, info.processName);
-    BOOL ok = DeviceIoControl(hDriver,
-                              IOCTL_UNPROT_PROCESS,
-                              &info, sizeof(info),
-                              NULL, 0,
-                              &bytes,
-                              NULL);
-
-    if (!ok) {
-        printf("DeviceIoControl 失败, GetLastError=%lu\n", GetLastError());
-        return FALSE;
-    }
-
-    printf("OK!\n");
-    return TRUE;
+    return IoCtlDriver(IOCTL_UNPROT_PROCESS, processName);
 }
 
 BOOL AddBlackProcess(const char* processName) {
-    ProtectProcessInfo info = { 0 };
-    strcpy(info.processName, processName);
-    info.processName[sizeof(info.processName) - 1] = 0;
+    return IoCtlDriver(IOCTL_ADD_BLACK, processName);
+}
 
-    DWORD bytes = 0;
-    printf("Send IOCtl, Code: 0x%X, processname: %s\n", IOCTL_ADD_BLACK, info.processName);
-    BOOL ok = DeviceIoControl(hDriver,
-                              IOCTL_ADD_BLACK,
-                              &info, sizeof(info),
-                              NULL, 0,
-                              &bytes,
-                              NULL);
+BOOL HideWindowProcess(const char* processName) {
+    char buffer[MAX_PATH] = { 0 };
+    GetModuleFileNameA(NULL, buffer, MAX_PATH);
+    char* pName = PathFindFileNameA(buffer);
+    AddWhiteProcess(pName);
 
-    if (!ok) {
-        printf("DeviceIoControl 失败, GetLastError=%lu\n", GetLastError());
-        return FALSE;
+    wchar_t fullPath[MAX_PATH] = { 0 };
+    GetFullPathNameW(HIDE_WINDOW_MODULE_NAME, MAX_PATH, fullPath, NULL);
+    std::wcout << "HideWindow module path: " << fullPath << L'\n';
+
+    while (true) {
+        DWORD pid = WaitForCreateProcess();
+        if (pid != 0) {
+            printf("New process created, PID: %lu\n", pid);
+
+            // 等一会
+            Sleep(100);
+
+            // 隐藏窗口
+            APCInjector injector(pid, fullPath);
+            if (injector.isInit()) {
+                if (injector.inject()) {
+                    printf("Injected HideWindow DLL into process %lu successfully.\n", pid);
+                } else {
+                    printf("Failed to inject HideWindow DLL into process %lu.\n", pid);
+                }
+            } else {
+                printf("Injector not initialized properly for process %lu.\n", pid);
+            }
+        }
     }
 
-    printf("OK!\n");
     return TRUE;
 }
 
@@ -126,6 +138,8 @@ int main(int argc, const char* argv[]) {
             mode = AddWhite;
         } else if (!strcmp(argv[i], "-ab")) {
             mode = AddBlack;
+        } else if (!strcmp(argv[i], "-hw")) {
+            mode = HideWindow;
         } else if (!strcmp(argv[i], "-im") && i + 1 < argc) {
             processName = argv[i + 1];
             i++;
@@ -157,6 +171,9 @@ int main(int argc, const char* argv[]) {
         break;
     case AddBlack:
         AddBlackProcess(processName);
+        break;
+    case HideWindow:
+        HideWindowProcess(processName);
         break;
     default:
         break;

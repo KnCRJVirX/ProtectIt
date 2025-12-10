@@ -3,3 +3,6 @@ build/
 
 test_*
 re_*
+
+load.bat
+unload.bat

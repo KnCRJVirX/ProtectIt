@@ -1,11 +1,11 @@
 ﻿#include "protectordef.h"
 #include "dri_protector.h"
 #include "dri_callbacks.h"
+#include "dri_notify.h"
 
 PDRIVER_OBJECT GlobalDriverObject;
-PVOID GlobalRegistrationHandle;
 
-static VOID CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info)
+VOID CompleteIrp(PIRP Irp, NTSTATUS status, ULONG_PTR info)
 {
     Irp->IoStatus.Status = status;
     Irp->IoStatus.Information = info;
@@ -78,6 +78,13 @@ NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         DbgPrint("Add blacklist process: %s", info->processName);
         break;
     }
+    case IOCTL_NOTIFY_CREATE_PS: {
+        status = CreateNotify(DeviceObject, Irp);
+
+        // 调试信息
+        DbgPrint("Set notify create process IRP.");
+        return status;
+    }
     default:
         status = STATUS_INVALID_DEVICE_REQUEST;
         break;
@@ -99,18 +106,27 @@ NTSTATUS DriverEntry(PDRIVER_OBJECT DriverObject, PUNICODE_STRING RegistryPath)
 
     // 创建设备
     status = IoCreateDevice(
-        DriverObject,
-        0,
-        &devName,
-        FILE_DEVICE_UNKNOWN,
-        0,
-        FALSE,
-        &devObj);
+            DriverObject,
+            sizeof(DEVICE_EXTENSION),
+            &devName,
+            FILE_DEVICE_UNKNOWN,
+            0,
+            FALSE,
+            &devObj);
     if (!NT_SUCCESS(status)) {
         DbgPrint("Protector: IoCreateDevice failed: 0x%X\n", status);
         return status;
     }
 
+    // 初始化Notify
+    status = InitNotify(DriverObject);
+    if (!NT_SUCCESS(status)) {
+        DbgPrint("Protector: InitNotify failed: 0x%X\n", status);
+        IoDeleteDevice(devObj);
+        return status;
+    }
+
+    // 保存全局 DriverObject 指针
     GlobalDriverObject = DriverObject;
 
     // 使用缓冲 I/O，配合 METHOD_BUFFERED

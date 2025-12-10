@@ -65,7 +65,7 @@ public:
             return false;
         }
         // 获取LoadLibraryW地址
-        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(TEXT("kernel32.dll")), "LoadLibraryW");
+        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
         // 创建远程线程并等待
         HANDLE hRemoteThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pLoadLibraryW, remoteMem, 0, NULL);
         WaitForSingleObject(hRemoteThread, INFINITE);
@@ -111,7 +111,7 @@ public:
             return false;
         }
         // 获取LoadLibraryW地址
-        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(TEXT("kernel32.dll")), "LoadLibraryW");
+        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
         
         // 遍历线程
         THREADENTRY32 te = {0};
@@ -180,7 +180,7 @@ public:
             return false;
         }
         // 获取LoadLibraryW地址
-        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(TEXT("kernel32.dll")), "LoadLibraryW");
+        LPVOID pLoadLibraryW = (LPVOID)GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "LoadLibraryW");
         
         // 遍历线程
         THREADENTRY32 te = {0};
