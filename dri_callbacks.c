@@ -12,12 +12,60 @@ ULLSet ProtectedListEntrySet;
 PVOID GlobalPsObCallbackHandle = NULL;
 PVOID GlobalEtwConsumerCallbackHandle = NULL;
 
-// ObReferenceObjectByName_t ObReferenceObjectByName = NULL;
 int SeAuditProcessCreationInfoOffset = 0;
 int ActiveProcessLinksOffset = 0;
 int ImageFilePointerOffset = 0;
+int ProtectionOffset = 0;
 POBJECT_TYPE EtwConsumerObjectType = NULL;
 POBJECT_TYPE EtwSessionObjectType = NULL;
+
+static UNICODE_STRING GetFileNameFromFullPath(PCUNICODE_STRING FullPath) {
+    UNICODE_STRING tmpFileName;
+    tmpFileName.Buffer = FullPath->Buffer;
+    tmpFileName.Length = FullPath->Length;;
+    tmpFileName.MaximumLength = FullPath->MaximumLength;
+
+    // 从尾部向前扫描
+    for (USHORT i = FullPath->Length / sizeof(WCHAR); i > 0; i--)
+    {
+        if (FullPath->Buffer[i - 1] == L'\\')
+        {
+            tmpFileName.Buffer = &FullPath->Buffer[i];
+            tmpFileName.Length = FullPath->Length - i * sizeof(WCHAR);
+            break;
+        }
+    }
+
+    // 手动构造UNICODE_STRING返回
+    UNICODE_STRING result = {0};
+    result.MaximumLength = tmpFileName.Length + sizeof(WCHAR);
+    result.Buffer = (PWCH)ExAllocatePoolWithTag(NonPagedPool, result.MaximumLength, 'File');
+    if (result.Buffer)
+    {
+        // 清零内存
+        RtlZeroMemory(result.Buffer, result.MaximumLength);
+        // 仅复制实际长度的数据
+        RtlCopyMemory(result.Buffer, tmpFileName.Buffer, tmpFileName.Length);
+        // 设置长度
+        result.Length = tmpFileName.Length;
+    }
+
+    return result;
+}
+
+static UNICODE_STRING GetProcessImageFileName(PEPROCESS Process, PPS_CREATE_NOTIFY_INFO CreateInfo) {
+    if (CreateInfo) {
+        PCUNICODE_STRING pcPath = CreateInfo->ImageFileName;
+        UNICODE_STRING fileName = GetFileNameFromFullPath(pcPath);
+        return fileName;
+    } else {
+        PUNICODE_STRING pPath = NULL;
+        SeLocateProcessImageName(Process, &pPath);
+        UNICODE_STRING fileName = GetFileNameFromFullPath(pPath);
+        ExFreePool(pPath);
+        return fileName;
+    }
+}
 
 NTSTATUS CallbacksInit() {
     NTSTATUS status = 0;
@@ -37,16 +85,29 @@ NTSTATUS CallbacksInit() {
     verInfo.dwOSVersionInfoSize = sizeof(RTL_OSVERSIONINFOW);
     RtlGetVersion((PRTL_OSVERSIONINFOW)&verInfo);
 
-    // 初始化 ActiveProcessLinks 偏移量
+    // 初始化版本有关偏移量
     PEPROCESS pCurrent = PsGetCurrentProcess();
     PUCHAR pImageFileName = PsGetProcessImageFileName(pCurrent);
     if (verInfo.dwMajorVersion >= 10) {
+        // ActiveProcessLinks
         if (verInfo.dwBuildNumber < 18362) {
             ActiveProcessLinksOffset = (int)((PCHAR)(pImageFileName) - ACTIVE_PS_LINKS_TO_IMAGE_NAME_OFFSET_BEFORE_1903 - (PCHAR)pCurrent);
         } else {
             ActiveProcessLinksOffset = (int)((PCHAR)(pImageFileName) - ACTIVE_PS_LINKS_TO_IMAGE_NAME_OFFSET - (PCHAR)pCurrent);
         }
         DbgPrint("Protector: ActiveProcessLinksOffset = 0x%X\n", ActiveProcessLinksOffset);
+
+        // Protection
+        if (verInfo.dwBuildNumber >= 26100) {
+            ProtectionOffset = PROTECTION_OFFSET_AFTER_26100;
+        } else if (verInfo.dwBuildNumber >= 19041) {
+            ProtectionOffset = PROTECTION_OFFSET_AFTER_19041;
+        } else if (verInfo.dwBuildNumber >= 18362) {
+            ProtectionOffset = PROTECTION_OFFSET_AFTER_18362;
+        } else {
+            ProtectionOffset = PROTECTION_OFFSET_BEFORE_18362;
+        }
+        DbgPrint("Protector: ProtectionOffset = 0x%X\n", ProtectionOffset);
     } else {
         DbgPrint("Protector: Unsupported OS version for ActiveProcessLinksOffset calculation.\n");
     }
@@ -88,11 +149,6 @@ NTSTATUS CallbacksInit() {
         return status;
     }
 
-    // 初始化 ObReferenceObjectByName 函数指针
-    // InitObReferenceObjectByName();
-    // 初始化 EtwConsumer 对象类型
-    // InitEtwObjectTypes();
-
     // 注册创建进程回调
     status = PsSetCreateProcessNotifyRoutineEx(CreateProcessNotifyCallback, FALSE);
     if (NT_SUCCESS(status)) {
@@ -102,14 +158,14 @@ NTSTATUS CallbacksInit() {
     }
 
     // 设置白名单
-    StringSetInsert(&WhiteListSet, (PUCHAR)"System");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"smss.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"csrss.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"lsass.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"dwm.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"explorer.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"svchost.exe");
-    StringSetInsert(&WhiteListSet, (PUCHAR)"ctfmon.exe");
+    StringSetInsert(&WhiteListSet, L"System");
+    StringSetInsert(&WhiteListSet, L"smss.exe");
+    StringSetInsert(&WhiteListSet, L"csrss.exe");
+    StringSetInsert(&WhiteListSet, L"lsass.exe");
+    StringSetInsert(&WhiteListSet, L"dwm.exe");
+    StringSetInsert(&WhiteListSet, L"explorer.exe");
+    StringSetInsert(&WhiteListSet, L"svchost.exe");
+    StringSetInsert(&WhiteListSet, L"ctfmon.exe");
 
     return STATUS_SUCCESS;
 }
@@ -127,50 +183,8 @@ NTSTATUS CallbacksResume() {
         GlobalEtwConsumerCallbackHandle = NULL;
     }
 
-    // 将断链的进程重新链回
-    PLIST_ENTRY activeProcessListEntry = (PLIST_ENTRY)((PUCHAR)PsInitialSystemProcess + ActiveProcessLinksOffset);
-    while (!ULLSetIsEmpty(&ProtectedListEntrySet)) {
-        PLIST_ENTRY entry = (PLIST_ENTRY)ULLGetFirst(&ProtectedListEntrySet);
-        InsertHeadList(activeProcessListEntry, entry);
-        ULLSetRemove(&ProtectedListEntrySet, (ULONGLONG)entry);
-
-        // 调试信息
-        DbgPrint("Protector: Restored process list entry: 0x%p\n", entry);
-    }
-
     return STATUS_SUCCESS;
 }
-
-// NTSTATUS InitEtwObjectTypes() {
-//     if (ObReferenceObjectByName == NULL) {
-//         return STATUS_UNSUCCESSFUL;
-//     }
-
-//     // 查找 EtwConsumer
-//     UNICODE_STRING consumerName = RTL_CONSTANT_STRING(L"\\ObjectTypes\\EtwConsumer");
-//     ObReferenceObjectByName(&consumerName, OBJ_CASE_INSENSITIVE, NULL, 0, NULL, KernelMode, NULL, &EtwConsumerObjectType);
-
-//     // 调试信息
-//     if (EtwConsumerObjectType) {
-//         DbgPrint("Protector: Found EtwConsumer Object Type: 0x%p\n", EtwConsumerObjectType);
-//     } else {
-//         DbgPrint("Protector: Failed to find EtwConsumer Object Type.\n");
-//     }
-
-//     // 查找 EtwSessionDemuxEntry (也就是 EtwSession)
-//     UNICODE_STRING sessionName = RTL_CONSTANT_STRING(L"\\ObjectTypes\\EtwSessionDemuxEntry");
-//     ObReferenceObjectByName(&sessionName, OBJ_CASE_INSENSITIVE, NULL, 0, NULL, KernelMode, NULL, &EtwSessionObjectType);
-
-//     // 调试信息
-//     if (EtwSessionObjectType) {
-//         DbgPrint("Protector: Found EtwSession Object Type: 0x%p\n", EtwSessionObjectType);
-//     } else {
-//         DbgPrint("Protector: Failed to find EtwSession Object Type.\n");
-//     }
-
-//     return STATUS_SUCCESS;
-// }
-
 NTSTATUS InitSeAuditOffset()
 {
     PEPROCESS pProcess = NULL;
@@ -257,114 +271,78 @@ OB_PREOP_CALLBACK_STATUS PreOpenObjectCallback(
     POB_PRE_OPERATION_INFORMATION OperationInformation
 ) {
     UNREFERENCED_PARAMETER(RegistrationContext);
+    
+    // 发起操作的进程
+    PEPROCESS currentProcess = PsGetCurrentProcess();
 
+    // 不拦截System进程
+    if (currentProcess == PsInitialSystemProcess) {
+        return OB_PREOP_SUCCESS;
+    }
+
+    // 不拦截白名单进程的打开操作
+    UNICODE_STRING currentName = GetProcessImageFileName(currentProcess, NULL);
+    if (StringSetContains(&WhiteListSet, currentName.Buffer)) {
+        goto End;
+    }
+
+    // 不拦截保护进程互相打开操作
+    if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(currentProcess))) {
+        goto End;
+    }
+
+    PEPROCESS targetProcess = NULL;
     if (OperationInformation->ObjectType == *PsProcessType) {
-        // 处理进程对象
-
         // 被打开的进程
-        PEPROCESS targetProcess = (PEPROCESS)OperationInformation->Object;
-        
-        // 发起操作的进程
-        PEPROCESS currentProcess = PsGetCurrentProcess();
-
+        targetProcess = (PEPROCESS)OperationInformation->Object;
         // 不拦截对自己的打开
         if (targetProcess == currentProcess) {
-            return OB_PREOP_SUCCESS; 
-        }
-
-        // 不拦截System进程
-        if (currentProcess == PsInitialSystemProcess) {
-            return OB_PREOP_SUCCESS;
-        }
-
-        // 不拦截白名单进程的打开操作
-        PUCHAR currentName = PsGetProcessImageFileName(currentProcess);
-        if (currentName && StringSetContains(&WhiteListSet, (PCHAR)currentName)) {
-            return OB_PREOP_SUCCESS;
-        }
-
-        // 不拦截保护进程互相打开操作
-        if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(currentProcess))) {
-            return OB_PREOP_SUCCESS;
-        }
-
-        // 拦截受保护进程的打开操作
-        if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(targetProcess))) {
-            if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                // 拦截创建句柄
-                // 清空权限
-                OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
-
-                // 调试信息
-                ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
-                ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
-                DbgPrint("Protector: Blocked process open. TargetPID: %lu, By: %s (PID: %lu)\n", pid, currentName ? (PCHAR)currentName : "Unknown", currentPid);
-            } else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                // 拦截复制句柄
-                // 清空权限
-                OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-
-                // 调试信息
-                ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
-                ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
-                DbgPrint("Protector: Blocked process handle duplicate. TargetPID: %lu, By: %s (PID: %lu)\n", pid, currentName ? (PCHAR)currentName : "Unknown", currentPid);
-            }
+            goto End;
         }
     } else if (OperationInformation->ObjectType == *PsThreadType) {
-        // 处理线程对象
-
         // 被打开的线程
         PETHREAD targetThread = (PETHREAD)OperationInformation->Object;
-        PEPROCESS targetProcess = PsGetThreadProcess(targetThread);
-        
-        // 发起操作的进程
-        PEPROCESS currentProcess = PsGetCurrentProcess();
-
+        targetProcess = PsGetThreadProcess(targetThread);
         // 不拦截对自己的打开
         if (targetProcess == currentProcess) {
-            return OB_PREOP_SUCCESS; 
+            goto End;
         }
+    } else {
+        // 其他对象类型不处理
+        goto End;
+    }
 
-        // 不拦截System进程
-        if (currentProcess == PsInitialSystemProcess) {
-            return OB_PREOP_SUCCESS;
-        }
+    // 拦截受保护进程的打开操作
+    if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(targetProcess))) {
+        if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
+            // 拦截创建句柄
+            // 清空权限
+            OperationInformation->Parameters->CreateHandleInformation.OriginalDesiredAccess = 0;
+            OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
 
-        // 不拦截白名单进程的打开操作
-        PUCHAR currentName = PsGetProcessImageFileName(currentProcess);
-        if (currentName && StringSetContains(&WhiteListSet, (PCHAR)currentName)) {
-            return OB_PREOP_SUCCESS;
-        }
+            // 调试信息
+#ifdef _DEBUG
+            ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
+            ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
+            DbgPrint("Protector: Blocked handle open. TargetPID: %lu, By: %wZ (PID: %lu)\n", pid, &currentName, currentPid);
+#endif
+        } else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
+            // 拦截复制句柄
+            // 清空权限
+            OperationInformation->Parameters->DuplicateHandleInformation.OriginalDesiredAccess = 0;
+            OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
 
-        // 不拦截保护进程互相打开操作
-        if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(currentProcess))) {
-            return OB_PREOP_SUCCESS;
-        }
-
-        // 拦截受保护进程的线程打开操作
-        if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)PsGetProcessId(targetProcess))) {
-            if (OperationInformation->Operation == OB_OPERATION_HANDLE_CREATE) {
-                // 拦截创建句柄
-                // 清空权限
-                OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
-
-                // 调试信息
-                ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
-                ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
-                DbgPrint("Protector: Blocked thread open. TargetPID: %lu, By: %s (PID: %lu)\n", pid, currentName ? (PCHAR)currentName : "Unknown", currentPid);
-            } else if (OperationInformation->Operation == OB_OPERATION_HANDLE_DUPLICATE) {
-                // 拦截复制句柄
-                // 清空权限
-                OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
-
-                // 调试信息
-                ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
-                ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
-                DbgPrint("Protector: Blocked thread handle duplicate. TargetPID: %lu, By: %s (PID: %lu)\n", pid, currentName ? (PCHAR)currentName : "Unknown", currentPid);
-            }
+            // 调试信息
+#ifdef _DEBUG
+            ULONG pid = HandleToUlong(PsGetProcessId(targetProcess));
+            ULONG currentPid = HandleToUlong(PsGetProcessId(currentProcess));
+            DbgPrint("Protector: Blocked handle duplicate. TargetPID: %lu, By: %wZ (PID: %lu)\n", pid, &currentName, currentPid);
+#endif
         }
     }
 
+End:
+    RtlFreeUnicodeString(&currentName);
     return OB_PREOP_SUCCESS;
 }
 
@@ -376,28 +354,30 @@ OB_PREOP_CALLBACK_STATUS PreEtwObjectCallback(
     if (OperationInformation->ObjectType == EtwConsumerObjectType) {
         // 检查发起者是否是黑名单进程
         PEPROCESS CurrentProcess = PsGetCurrentProcess();
-        PUCHAR processName = PsGetProcessImageFileName(CurrentProcess);
-        if (StringSetContains(&BlackListSet, (PCHAR)processName)) {
+        UNICODE_STRING processName = GetProcessImageFileName(CurrentProcess, NULL);
+        if (StringSetContains(&BlackListSet, processName.Buffer)) {
             // 剥夺权限
             OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
             OperationInformation->Parameters->DuplicateHandleInformation.DesiredAccess = 0;
 
             // 调试信息
-            DbgPrint("Protector: Blocked ETW Consumer access from %s (PID: %lu)\n", processName ? (PCHAR)processName : "Unknown", HandleToUlong(PsGetProcessId(CurrentProcess)));
+            DbgPrint("Protector: Blocked ETW Consumer access from %wZ (PID: %lu)\n", &processName, HandleToUlong(PsGetProcessId(CurrentProcess)));
         }
+        RtlFreeUnicodeString(&processName);
     }
     
     // 同样逻辑处理 EtwSessionDemuxEntry，防止它 StartTrace
     if (OperationInformation->ObjectType == EtwSessionObjectType) {
         PEPROCESS CurrentProcess = PsGetCurrentProcess();
-        PUCHAR processName = PsGetProcessImageFileName(CurrentProcess);
-        if (StringSetContains(&BlackListSet, (PCHAR)processName)) {
+        UNICODE_STRING processName = GetProcessImageFileName(CurrentProcess, NULL);
+        if (StringSetContains(&BlackListSet, processName.Buffer)) {
             // 剥夺权限
             OperationInformation->Parameters->CreateHandleInformation.DesiredAccess = 0;
 
             // 调试信息
-            DbgPrint("Protector: Blocked ETW Session Control from %s (PID: %lu)\n", processName ? (PCHAR)processName : "Unknown", HandleToUlong(PsGetProcessId(CurrentProcess)));
+            DbgPrint("Protector: Blocked ETW Session Control from %wZ (PID: %lu)\n", &processName, HandleToUlong(PsGetProcessId(CurrentProcess)));
         }
+        RtlFreeUnicodeString(&processName);
     }
 
     return OB_PREOP_SUCCESS;
@@ -444,52 +424,11 @@ VOID RemoveProcessPrivileges(PEPROCESS Process)
     pPrivileges->EnabledByDefault &= ~removeMask;
 
     // 调试信息
+#ifdef _DEBUG
     DbgPrint("Protector: Removed privileges 0x%llX from process PID: %lu\n", removeMask, HandleToUlong(PsGetProcessId(Process)));
+#endif
 
     ObDereferenceObject(token);
-}
-
-// 修改进程的PEB
-NTSTATUS ModifyProcessPEB(PEPROCESS Process) {
-    KAPC_STATE ApcState;
-    NTSTATUS status = STATUS_SUCCESS;
-    
-    // 获取 PEB 指针 (这个地址是 User Mode 虚拟地址)
-    PPEB pPeb = PsGetProcessPeb(Process);
-    if (!pPeb) {
-        return STATUS_INVALID_PARAMETER;
-    }
-
-    // 挂靠到目标进程 (切换 CR3)
-    // 这一步之后，我们就可以像在 Ring3 进程内部一样访问 pPeb 了
-    KeStackAttachProcess(Process, &ApcState);
-
-    __try {
-        // 修改窗口名
-        UNICODE_STRING fakeTitle;
-        RtlInitUnicodeString(&fakeTitle, FAKE_WINDOW_NAME_W);
-
-        RTL_USER_PROCESS_PARAMETERS* pParams = pPeb->ProcessParameters;
-        if (pParams->WindowTitle.Length >= fakeTitle.Length) {
-            RtlCopyMemory(pParams->WindowTitle.Buffer, fakeTitle.Buffer, fakeTitle.Length + sizeof(WCHAR));
-            pParams->WindowTitle.Length = fakeTitle.Length;
-
-            // 调试信息
-            DbgPrint("Protector: Modified PEB Window Title to: %wZ\n", &pParams->WindowTitle);
-        } else {
-            DbgPrint("Protector: PEB Window Title buffer too small to modify.\n");
-        }
-    }
-    __except (EXCEPTION_EXECUTE_HANDLER) {
-        // 捕获页面错误 (防止用户态内存无效导致蓝屏)
-        DbgPrint("Protector: Exception access PEB!\n");
-        status = GetExceptionCode();
-    }
-
-    // 解除挂靠
-    KeUnstackDetachProcess(&ApcState);
-
-    return status;
 }
 
 // 用于修改进程名的工作项上下文结构体
@@ -498,56 +437,24 @@ typedef struct _PROCESS_INFO_CONTEXT {
     PIO_WORKITEM WorkItem;
 } PROCESS_INFO_CONTEXT, *PPROCESS_INFO_CONTEXT;
 
-// 隐藏新进程
-VOID HideProcessRoutine(PDEVICE_OBJECT DeviceObject, PVOID Context)
+// 延迟修改
+VOID DelayModifyProcessRoutine(PDEVICE_OBJECT DeviceObject, PVOID Context)
 {
+    KSLEEP(1000);
     PPROCESS_INFO_CONTEXT pContext = (PPROCESS_INFO_CONTEXT)Context;
     HANDLE processId = pContext->ProcessId;
     PEPROCESS Process = NULL;
     if (NT_SUCCESS(PsLookupProcessByProcessId(processId, &Process))) {
-        // 修改进程名
-        PUCHAR psName = PsGetProcessImageFileName(Process);
-        RtlCopyMemory(psName, FAKE_PROCESS_NAME, sizeof(FAKE_PROCESS_NAME));
+        // 改PPL
+        PPS_PROTECTION pPPL = (PPS_PROTECTION)((PUCHAR)Process + ProtectionOffset);
+        PS_PROTECTION ppl = {0};
+        ppl.Flags.Type = PsProtectedTypeProtectedLight;
+        ppl.Flags.Signer = PsProtectedSignerWinTcb;
+        pPPL->Level = ppl.Level;
         // 调试信息
-        DbgPrint("Protector: Modified process name to: %s\n", psName);
-
-        // 修改进程路径
-        PSE_AUDIT_PROCESS_CREATION_INFO pSeAuditInfo = (PSE_AUDIT_PROCESS_CREATION_INFO)((PUCHAR)Process + SeAuditProcessCreationInfoOffset);
-        if (pSeAuditInfo->ImageFileName->Name.Buffer && pSeAuditInfo->ImageFileName->Name.Length >= sizeof(FAKE_PROCESS_NTPATH_W)) {
-            UNICODE_STRING fakeImagePath;
-            RtlInitUnicodeString(&fakeImagePath, FAKE_PROCESS_NTPATH_W);
-            
-            PWCH pathBuffer = pSeAuditInfo->ImageFileName->Name.Buffer;
-            RtlCopyMemory(pathBuffer, fakeImagePath.Buffer, fakeImagePath.Length + sizeof(WCHAR));
-            pSeAuditInfo->ImageFileName->Name.Length = fakeImagePath.Length;
-
-            // 调试信息
-            DbgPrint("Protector: Modified process path to: %wZ\n", &pSeAuditInfo->ImageFileName->Name);
-        }
-
-        // 修改 ImageFilePointer 中的路径
-        PFILE_OBJECT pFileObject = *(PFILE_OBJECT*)((PUCHAR)Process + ImageFilePointerOffset);
-        if (pFileObject) {
-            UNICODE_STRING fakeFileObjPath;
-            RtlInitUnicodeString(&fakeFileObjPath, FAKE_PROCESS_FILEOBJECT_FILENAME_W);
-
-            RtlCopyMemory(pFileObject->FileName.Buffer, fakeFileObjPath.Buffer, fakeFileObjPath.Length + sizeof(WCHAR));
-            pFileObject->FileName.Length = fakeFileObjPath.Length;
-
-            // 调试信息
-            DbgPrint("Protector: Modified ImageFilePointer path to: %wZ\n", &pFileObject->FileName);
-        }
-
-        // // 断链
-        // PLIST_ENTRY pActiveLinks = (PLIST_ENTRY)((PUCHAR)Process + ActiveProcessLinksOffset);
-        // RemoveEntryList(pActiveLinks);
-        // ULLSetInsert(&ProtectedListEntrySet, (ULONG_PTR)pActiveLinks);
-
-        // // 调试信息
-        // DbgPrint("Protector: Hid process PID: %lu\n", HandleToUlong(processId));
-
-        // 修改 PEB
-        ModifyProcessPEB(Process);
+#ifdef _DEBUG
+        DbgPrint("Protector: Modify PID: %d Protection to: 0x%X\n", processId, pPPL->Level);
+#endif
 
         // 释放工作项和上下文
         IoFreeWorkItem(pContext->WorkItem);
@@ -556,24 +463,56 @@ VOID HideProcessRoutine(PDEVICE_OBJECT DeviceObject, PVOID Context)
     }
 }
 
-// 修改新黑名单进程
-VOID ModifyBlacklistedProcess(PDEVICE_OBJECT DeviceObject, PVOID Context)
-{
-    PPROCESS_INFO_CONTEXT pContext = (PPROCESS_INFO_CONTEXT)Context;
-    HANDLE processId = pContext->ProcessId;
-    PEPROCESS Process = NULL;
-    if (NT_SUCCESS(PsLookupProcessByProcessId(processId, &Process))) {
-        // 移除权限
-        RemoveProcessPrivileges(Process);
-        // 调试信息
-        DbgPrint("Protector: Modified blacklisted process PID: %lu\n", HandleToUlong(processId));
+VOID HideAndModifyProcess(PEPROCESS Process) {
+    // 修改进程名
+    PUCHAR psName = PsGetProcessImageFileName(Process);
+    RtlCopyMemory(psName, FAKE_PROCESS_NAME, sizeof(FAKE_PROCESS_NAME));
+    // 调试信息
+#ifdef _DEBUG
+    DbgPrint("Protector: Modified process name to: %s\n", psName);
+#endif
 
-        ObDereferenceObject(Process);
+    // 修改进程路径
+    PSE_AUDIT_PROCESS_CREATION_INFO pSeAuditInfo = (PSE_AUDIT_PROCESS_CREATION_INFO)((PUCHAR)Process + SeAuditProcessCreationInfoOffset);
+    if (pSeAuditInfo->ImageFileName->Name.Buffer && pSeAuditInfo->ImageFileName->Name.Length >= sizeof(FAKE_PROCESS_NTPATH_W)) {
+        UNICODE_STRING fakeImagePath;
+        RtlInitUnicodeString(&fakeImagePath, FAKE_PROCESS_NTPATH_W);
+        
+        PWCH pathBuffer = pSeAuditInfo->ImageFileName->Name.Buffer;
+        RtlCopyMemory(pathBuffer, fakeImagePath.Buffer, fakeImagePath.Length + sizeof(WCHAR));
+        pSeAuditInfo->ImageFileName->Name.Length = fakeImagePath.Length;
+
+        // 调试信息
+#ifdef _DEBUG
+        DbgPrint("Protector: Modified process path to: %wZ\n", &pSeAuditInfo->ImageFileName->Name);
+#endif
     }
 
-    // 释放工作项和上下文
-    IoFreeWorkItem(pContext->WorkItem);
-    ExFreePoolWithTag(pContext, 'Work');
+    // 修改 ImageFilePointer 中的路径
+    PFILE_OBJECT pFileObject = *(PFILE_OBJECT*)((PUCHAR)Process + ImageFilePointerOffset);
+    if (pFileObject) {
+        UNICODE_STRING fakeFileObjPath;
+        RtlInitUnicodeString(&fakeFileObjPath, FAKE_PROCESS_FILEOBJECT_FILENAME_W);
+
+        RtlCopyMemory(pFileObject->FileName.Buffer, fakeFileObjPath.Buffer, fakeFileObjPath.Length + sizeof(WCHAR));
+        pFileObject->FileName.Length = fakeFileObjPath.Length;
+
+        // 调试信息
+#ifdef _DEBUG
+        DbgPrint("Protector: Modified ImageFilePointer path to: %wZ\n", &pFileObject->FileName);
+#endif
+    }
+}
+
+// 修改新黑名单进程
+VOID ModifyBlacklistedProcess(PEPROCESS Process)
+{
+    // 移除权限
+    RemoveProcessPrivileges(Process);
+    // 调试信息
+#ifdef _DEBUG
+    DbgPrint("Protector: Modified blacklisted process PID: %lu\n", PsGetProcessId(Process));
+#endif
 }
 
 // 创建进程回调
@@ -585,50 +524,54 @@ VOID CreateProcessNotifyCallback(
 {
     if (CreateInfo) {
         // 获取镜像文件名
-        PCHAR processName = PsGetProcessImageFileName(Process);
-        // 判断是要修改的进程
-        if (processName && (StringSetContains(&ProtectProcessSet, (PUCHAR)processName) || StringSetContains(&BlackListSet, (PUCHAR)processName))) {
-            // 调试信息
-            DbgPrint("Protector: Process created: %s (PID: %lu, Parent PID: %lu)\n", processName, ProcessId, CreateInfo->ParentProcessId);
+        UNICODE_STRING processName = GetProcessImageFileName(Process, CreateInfo);
 
-            // 分配工作项上下文
+        if (StringSetContains(&ProtectProcessSet, processName.Buffer)) {
+            // 保护进程
+            // 调试信息
+#ifdef _DEBUG
+        DbgPrint("Protector: Protected process created: %wZ (PID: %lu, Parent PID: %lu)\n", &processName, ProcessId, CreateInfo->ParentProcessId);
+#endif
+            // 加入保护 PID 集合
+            ULLSetInsert(&ProtectedPidSet, (ULONG_PTR)ProcessId);
+            // 修改进程
+            HideAndModifyProcess(Process);
+
+            // 分配上下文
             PROCESS_INFO_CONTEXT* pContext = (PROCESS_INFO_CONTEXT*)ExAllocatePoolWithTag(NonPagedPool, sizeof(PROCESS_INFO_CONTEXT), 'Work');
             if (pContext) {
                 pContext->ProcessId = ProcessId;
                 pContext->WorkItem = IoAllocateWorkItem(GlobalDriverObject->DeviceObject);
                 if (pContext->WorkItem) {
                     // 投递工作项
-                    if (StringSetContains(&ProtectProcessSet, (PUCHAR)processName)) {
-                        // 加入保护 PID 集合
-                        ULLSetInsert(&ProtectedPidSet, (ULONG_PTR)ProcessId);
-                        // 保护进程
-                        IoQueueWorkItem(pContext->WorkItem, HideProcessRoutine, CriticalWorkQueue, pContext);
-                        // 通知
-                        NotifyCreateProcess(GlobalDriverObject, Process);
-                    } else if (StringSetContains(&BlackListSet, (PUCHAR)processName)) {
-                        // 黑名单进程
-                        IoQueueWorkItem(pContext->WorkItem, ModifyBlacklistedProcess, CriticalWorkQueue, pContext);
-                    }
+                    IoQueueWorkItem(pContext->WorkItem, DelayModifyProcessRoutine, CriticalWorkQueue, pContext);
                 } else {
                     ExFreePoolWithTag(pContext, 'Work');
                 }
             }
+            
+            // 通知
+            NotifyCreateProcess(GlobalDriverObject, Process);
+        } else if (StringSetContains(&BlackListSet, processName.Buffer)) {
+            // 黑名单进程
+            // 调试信息
+#ifdef _DEBUG
+        DbgPrint("Protector: Blacklist process created: %wZ (PID: %lu, Parent PID: %lu)\n", &processName, ProcessId, CreateInfo->ParentProcessId);
+#endif
+            // 修改进程
+            ModifyBlacklistedProcess(Process);
         }
+
+        RtlFreeUnicodeString(&processName);
     } else {
         // 进程退出，移除保护 PID
         if (ULLSetContains(&ProtectedPidSet, (ULONG_PTR)ProcessId)) {
             ULLSetRemove(&ProtectedPidSet, (ULONG_PTR)ProcessId);
+            
+            // 调试信息
+#ifdef _DEBUG
             DbgPrint("Protector: Protected process exited. PID: %lu\n", ProcessId);
+#endif
         }
-
-        // // 断链的进程重新链回
-        // PLIST_ENTRY pActiveLinks = (PLIST_ENTRY)((PUCHAR)Process + ActiveProcessLinksOffset);
-        // if (ULLSetContains(&ProtectedListEntrySet, (ULONG_PTR)pActiveLinks)) {
-        //     PLIST_ENTRY activeProcessListEntry = (PLIST_ENTRY)((PUCHAR)PsInitialSystemProcess + ActiveProcessLinksOffset);
-        //     InsertHeadList(activeProcessListEntry, pActiveLinks);
-        //     ULLSetRemove(&ProtectedListEntrySet, (ULONG_PTR)pActiveLinks);
-
-        //     DbgPrint("Protector: Re-linked exited process PID: %lu\n", ProcessId);
-        // }
     }
 }

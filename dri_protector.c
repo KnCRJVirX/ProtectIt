@@ -36,53 +36,51 @@ VOID DriverUnload(PDRIVER_OBJECT DriverObject)
 
 NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
 {
-    UNREFERENCED_PARAMETER(DeviceObject);
-
     NTSTATUS status = STATUS_INVALID_DEVICE_REQUEST;
     PIO_STACK_LOCATION stack = IoGetCurrentIrpStackLocation(Irp);
     ULONG code = stack->Parameters.DeviceIoControl.IoControlCode;
     ProtectProcessInfo* info = (ProtectProcessInfo*)Irp->AssociatedIrp.SystemBuffer;
 
-    // DbgPrint("Receive IOCtl, Code: 0x%X", code);
-
     switch (code) {
     case IOCTL_PROT_PROCESS: {
-        StringSetInsert(&ProtectProcessSet, (PUCHAR)info->processName);
+        StringSetInsert(&ProtectProcessSet, info->processName);
         status = STATUS_SUCCESS;
 
         // 调试信息
-        DbgPrint("Protect process: %s", info->processName);
+        DbgPrint("Protect process: %ws\n", info->processName);
         break;
     }
     case IOCTL_UNPROT_PROCESS: {
         // 从保护集合中移除该进程名
-        StringSetRemove(&ProtectProcessSet, (PUCHAR)info->processName);
+        StringSetRemove(&ProtectProcessSet, info->processName);
         status = STATUS_SUCCESS;
 
-        DbgPrint("Unprotect process: %s", info->processName);
+        DbgPrint("Unprotect process: %ws\n", info->processName);
         break;
     }
     case IOCTL_ADD_WHITE: {
-        StringSetInsert(&WhiteListSet, (PUCHAR)info->processName);
+        StringSetInsert(&WhiteListSet, info->processName);
         status = STATUS_SUCCESS;
 
         // 调试信息
-        DbgPrint("Add whitelist process: %s", info->processName);
+        DbgPrint("Add whitelist process: %ws\n", info->processName);
         break;
     }
     case IOCTL_ADD_BLACK: {
-        StringSetInsert(&BlackListSet, (PUCHAR)info->processName);
+        StringSetInsert(&BlackListSet, info->processName);
         status = STATUS_SUCCESS;
 
         // 调试信息
-        DbgPrint("Add blacklist process: %s", info->processName);
+        DbgPrint("Add blacklist process: %ws\n", info->processName);
         break;
     }
     case IOCTL_NOTIFY_CREATE_PS: {
         status = CreateNotify(DeviceObject, Irp);
 
         // 调试信息
+#ifdef _DEBUG
         DbgPrint("Set notify create process IRP.");
+#endif
         return status;
     }
     default:
@@ -90,7 +88,6 @@ NTSTATUS DispatchDeviceControl(PDEVICE_OBJECT DeviceObject, PIRP Irp)
         break;
     }
 
-    // DbgPrint("Status: 0x%X", status);
     CompleteIrp(Irp, status, 0);
     return status;
 }

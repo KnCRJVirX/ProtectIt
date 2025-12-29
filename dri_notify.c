@@ -63,7 +63,6 @@ NTSTATUS CreateNotify(PDEVICE_OBJECT pDeviceObject, PIRP Irp) {
 
         // 放入队列
         InsertTailList(&pdx->PendingIrpQueue, &Irp->Tail.Overlay.ListEntry);
-
         KeReleaseSpinLock(&pdx->QueueLock, oldIrql);
 
         // 返回 STATUS_PENDING，告诉系统：“我还没做完，让R3等着”
@@ -129,5 +128,7 @@ VOID NotifyCreateProcess(PDRIVER_OBJECT pDriverObject, PEPROCESS Process) {
     Notify(pDriverObject, &dwPid, sizeof(INT32));
 
     // 调试信息
+#ifdef _DEBUG
     DbgPrint("Protector: Notified process creation, PID: %d\n", dwPid);
+#endif
 }

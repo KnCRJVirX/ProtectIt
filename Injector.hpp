@@ -69,8 +69,16 @@ public:
         // 创建远程线程并等待
         HANDLE hRemoteThread = CreateRemoteThread(hProcess, NULL, 0, (LPTHREAD_START_ROUTINE)pLoadLibraryW, remoteMem, 0, NULL);
         WaitForSingleObject(hRemoteThread, INFINITE);
-        // 释放内存
+
+        DWORD exitCode = 0;
+        GetExitCodeThread(hRemoteThread, &exitCode);
+        CloseHandle(hRemoteThread);
         VirtualFreeEx(hProcess, remoteMem, (dllPath.length() + 2) * sizeof(WCHAR), MEM_RELEASE);
+        printf("Remote LoadLibraryW returned: 0x%X\n", exitCode);
+        if (exitCode == 0) {
+            return false;
+        }
+
         return true;
     }
 };

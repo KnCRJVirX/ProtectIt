@@ -7,9 +7,11 @@
 
 #include <ntifs.h>
 
+#define ELEMOF(s) (sizeof(s) / sizeof(s[0]))
+
 typedef struct StaticString {
     size_t length;
-    UCHAR data[64];
+    WCHAR data[64];
 } StaticString;
 
 typedef struct StringSet {
@@ -25,16 +27,16 @@ static inline RTL_GENERIC_COMPARE_RESULTS StaticStringCompare(
     StaticString* p1 = (StaticString*)FirstStruct;
     StaticString* p2 = (StaticString*)SecondStruct;
 
-    ANSI_STRING as1 = {0}, as2 = {0};
-    RtlInitAnsiString(&as1, p1->data);
-    RtlInitAnsiString(&as2, p2->data);
+    UNICODE_STRING us1 = {0}, us2 = {0};
+    RtlInitUnicodeString(&us1, p1->data);
+    RtlInitUnicodeString(&us2, p2->data);
 
-    if (RtlCompareString(&as1, &as2, TRUE) == 0) {
+    if (RtlCompareUnicodeString(&us1, &us2, TRUE) == 0) {
         return GenericEqual;
-    } else if (RtlCompareString(&as1, &as2, TRUE) > 0) {
+    } else if (RtlCompareUnicodeString(&us1, &us2, TRUE) > 0) {
         return GenericGreaterThan;
     }
-    
+
     return GenericLessThan;
 }
 
@@ -68,12 +70,12 @@ static inline VOID StringSetInit(StringSet* stringSet) {
     );
 }
 
-static inline BOOLEAN StringSetInsert(StringSet* stringSet, PUCHAR str) {
+static inline BOOLEAN StringSetInsert(StringSet* stringSet, PWCHAR str) {
     StaticString tempString = {0};
-    size_t strLength = strnlen_s(str, sizeof(tempString.data) - 1);
+    size_t strLength = (wcsnlen_s(str, ELEMOF(tempString.data)) + 1) * sizeof(WCHAR);
     tempString.length = strLength;
-    RtlCopyMemory(tempString.data, str, strLength);
-    tempString.data[strLength] = '\0';
+    RtlCopyMemory(tempString.data, str, min(strLength, sizeof(tempString.data)));
+    tempString.data[ELEMOF(tempString.data) - 1] = L'\0';
 
     BOOLEAN isNew;
     PVOID pInserted = RtlInsertElementGenericTableAvl(
@@ -86,12 +88,12 @@ static inline BOOLEAN StringSetInsert(StringSet* stringSet, PUCHAR str) {
     return isNew;
 }
 
-static inline BOOLEAN StringSetContains(StringSet* stringSet, PUCHAR str) {
+static inline BOOLEAN StringSetContains(StringSet* stringSet, PWCHAR str) {
     StaticString tempString = {0};
-    size_t strLength = strnlen_s(str, sizeof(tempString.data) - 1);
+    size_t strLength = (wcsnlen_s(str, ELEMOF(tempString.data)) + 1) * sizeof(WCHAR);
     tempString.length = strLength;
-    RtlCopyMemory(tempString.data, str, strLength);
-    tempString.data[strLength] = '\0';
+    RtlCopyMemory(tempString.data, str, min(strLength, sizeof(tempString.data)));
+    tempString.data[ELEMOF(tempString.data) - 1] = L'\0';
 
     PVOID pFound = RtlLookupElementGenericTableAvl(
         &stringSet->avlTable,
@@ -101,12 +103,12 @@ static inline BOOLEAN StringSetContains(StringSet* stringSet, PUCHAR str) {
     return (pFound != NULL);
 }
 
-static inline VOID StringSetRemove(StringSet* stringSet, PUCHAR str) {
+static inline VOID StringSetRemove(StringSet* stringSet, PWCHAR str) {
     StaticString tempString = {0};
-    size_t strLength = strnlen_s(str, sizeof(tempString.data) - 1);
+    size_t strLength = (wcsnlen_s(str, ELEMOF(tempString.data)) + 1) * sizeof(WCHAR);
     tempString.length = strLength;
-    RtlCopyMemory(tempString.data, str, strLength);
-    tempString.data[strLength] = '\0';
+    RtlCopyMemory(tempString.data, str, min(strLength, sizeof(tempString.data)));
+    tempString.data[ELEMOF(tempString.data) - 1] = L'\0';
 
     RtlDeleteElementGenericTableAvl(
         &stringSet->avlTable,

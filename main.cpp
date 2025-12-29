@@ -8,6 +8,7 @@
 #include "Injector.hpp"
 
 #define HIDE_WINDOW_MODULE_NAME L"HideWindow.dll"
+#define ELEMOF(s) (sizeof(s) / sizeof(s[0]))
 
 enum WorkMode {
     HideWindow,
@@ -17,15 +18,19 @@ enum WorkMode {
     AddBlack
 };
 
+typedef struct ProtectProcessInfo {
+    WCHAR processName[64];
+} ProtectProcessInfo;
+
 HANDLE hDriver = INVALID_HANDLE_VALUE;
 
-BOOL IoCtlDriver(DWORD ioctlCode, const char* processName) {
+BOOL IoCtlDriver(DWORD ioctlCode, const wchar_t* processName) {
     ProtectProcessInfo info = { 0 };
-    strcpy(info.processName, processName);
-    info.processName[sizeof(info.processName) - 1] = 0;
+    wcscpy(info.processName, processName);
+    info.processName[ELEMOF(info.processName) - 1] = 0;
 
     DWORD bytes = 0;
-    printf("Send IOCtl, Code: 0x%X, processname: %s\n", IOCTL_PROT_PROCESS, info.processName);
+    printf("Send IOCtl, Code: 0x%X, processname: %ws\n", IOCTL_PROT_PROCESS, info.processName);
     BOOL ok = DeviceIoControl(hDriver,
                               ioctlCode,
                               &info, sizeof(info),
@@ -55,8 +60,7 @@ BOOL IoCtlDriverWithReturn(DWORD ioctlCode, PVOID buffer, DWORD bufferSize) {
         printf("DeviceIoControl 失败, GetLastError=%lu\n", GetLastError());
         return FALSE;
     }
-
-    printf("OK!\n");
+    
     return TRUE;
 }
 
@@ -67,26 +71,26 @@ DWORD WaitForCreateProcess() {
     return processId;
 }
 
-BOOL ProtectProcess(const char* processName) {
+BOOL ProtectProcess(const wchar_t* processName) {
     return IoCtlDriver(IOCTL_PROT_PROCESS, processName);
 }
 
-BOOL AddWhiteProcess(const char* processName) {
+BOOL AddWhiteProcess(const wchar_t* processName) {
     return IoCtlDriver(IOCTL_ADD_WHITE, processName);
 }
 
-BOOL UnprotectProcess(const char* processName) {
+BOOL UnprotectProcess(const wchar_t* processName) {
     return IoCtlDriver(IOCTL_UNPROT_PROCESS, processName);
 }
 
-BOOL AddBlackProcess(const char* processName) {
+BOOL AddBlackProcess(const wchar_t* processName) {
     return IoCtlDriver(IOCTL_ADD_BLACK, processName);
 }
 
-BOOL HideWindowProcess(const char* processName) {
-    char buffer[MAX_PATH] = { 0 };
-    GetModuleFileNameA(NULL, buffer, MAX_PATH);
-    char* pName = PathFindFileNameA(buffer);
+BOOL HideWindowProcess(const wchar_t* processName) {
+    WCHAR buffer[MAX_PATH] = { 0 };
+    GetModuleFileNameW(NULL, buffer, MAX_PATH);
+    PWCH pName = PathFindFileNameW(buffer);
     AddWhiteProcess(pName);
 
     wchar_t fullPath[MAX_PATH] = { 0 };
@@ -102,7 +106,7 @@ BOOL HideWindowProcess(const char* processName) {
             Sleep(100);
 
             // 隐藏窗口
-            APCInjector injector(pid, fullPath);
+            RemoteThreadInjector injector(pid, fullPath);
             if (injector.isInit()) {
                 if (injector.inject()) {
                     printf("Injected HideWindow DLL into process %lu successfully.\n", pid);
@@ -128,7 +132,8 @@ int main(int argc, const char* argv[]) {
     }
 
     WorkMode mode = Protect;
-    const char* processName = nullptr;
+    const char* processNameA = nullptr;
+    WCHAR processName[MAX_PATH] = {0};
     for (int i = 0; i < argc; i++) {
         if (!strcmp(argv[i], "-p")) {
             mode = Protect;
@@ -141,7 +146,8 @@ int main(int argc, const char* argv[]) {
         } else if (!strcmp(argv[i], "-hw")) {
             mode = HideWindow;
         } else if (!strcmp(argv[i], "-im") && i + 1 < argc) {
-            processName = argv[i + 1];
+            processNameA = argv[i + 1];
+            utf8toutf16(processNameA, processName, MAX_PATH);
             i++;
         }
     }

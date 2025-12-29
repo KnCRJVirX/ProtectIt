@@ -1,6 +1,8 @@
 ﻿#ifndef GET_INFO_UTILS
 #define GET_INFO_UTILS
 
+#define _CRT_SECURE_NO_WARNINGS
+
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -67,19 +69,19 @@ static inline char* utf16toutf8(const wchar_t* utf16text, char* utf8text, int ut
 }
 static inline char* utf8togbk(const char* utf8text, char* gbktext, int gbktext_size)
 {
-    int utf16_text_len = (strlen(utf8text) + 1) * 2;
+    size_t utf16_text_len = (strlen(utf8text) + 1) * 2;
     wchar_t* utf16text = (wchar_t*)calloc(utf16_text_len, sizeof(wchar_t));
-    MultiByteToWideChar(CP_UTF8, 0, utf8text, -1, utf16text, utf16_text_len);
+    MultiByteToWideChar(CP_UTF8, 0, utf8text, -1, utf16text, (int)utf16_text_len);
     WideCharToMultiByte(936, 0, utf16text, -1, gbktext, gbktext_size, NULL, NULL);
     free(utf16text);
     return gbktext;
 }
 static inline char* gbktoutf8(const char* gbktext, char* utf8text, size_t utf8text_size)
 {
-    int utf16_text_len = (strlen(gbktext) + 1) * 2;
+    size_t utf16_text_len = (strlen(gbktext) + 1) * 2;
     wchar_t* utf16text = (wchar_t*)calloc(utf16_text_len, sizeof(wchar_t));
-    MultiByteToWideChar(936, 0, gbktext, -1, utf16text, utf16_text_len);
-    WideCharToMultiByte(CP_UTF8, 0, utf16text, -1, utf8text, utf8text_size, NULL, NULL);
+    MultiByteToWideChar(936, 0, gbktext, -1, utf16text, (int)utf16_text_len);
+    WideCharToMultiByte(CP_UTF8, 0, utf16text, -1, utf8text, (int)utf8text_size, NULL, NULL);
     free(utf16text);
     return utf8text;
 }
@@ -142,7 +144,7 @@ static inline DWORD GetProcessIdByName(const LPWSTR processName)
     WCHAR processNameUpr[MAX_PATH] = {0};
     WCHAR tmpProcessName[MAX_PATH] = {0};
     wcscpy(processNameUpr, processName);
-    wcsupr(processNameUpr);
+    _wcsupr(processNameUpr);
     
     // 遍历快照，找到进程名匹配的
     DWORD resultPID = 0;
@@ -155,7 +157,7 @@ static inline DWORD GetProcessIdByName(const LPWSTR processName)
     do
     {
         wcscpy(tmpProcessName, pe.szExeFile);
-        wcsupr(tmpProcessName);
+        _wcsupr(tmpProcessName);
         if (!wcscmp(tmpProcessName, processNameUpr))
         {
             resultPID = pe.th32ProcessID;
@@ -180,7 +182,7 @@ static inline HMODULE GetRemoteModuleHandle(DWORD processId, const LPWSTR module
     WCHAR moduleNameUpr[MAX_PATH] = {0};
     WCHAR tmpModuleName[MAX_PATH] = {0};
     wcscpy(moduleNameUpr, moduleName);
-    wcsupr(moduleNameUpr);
+    _wcsupr(moduleNameUpr);
     
     // 遍历快照，找到模块名匹配的
     HMODULE resulthModule = NULL;
@@ -194,7 +196,7 @@ static inline HMODULE GetRemoteModuleHandle(DWORD processId, const LPWSTR module
     do
     {
         wcscpy(tmpModuleName, me.szModule);
-        wcsupr(tmpModuleName);
+        _wcsupr(tmpModuleName);
         if (!wcscmp(tmpModuleName, moduleNameUpr))
         {
             printf("From Process:%d Found module: %s\n", processId, utf16toutf8(me.szModule, utf8_buffer, M_BUF_SIZ));
